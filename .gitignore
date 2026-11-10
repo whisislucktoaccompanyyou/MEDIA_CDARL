@@ -13,8 +13,9 @@ test_output_1/
 logs/
 logs_launch/
 
-# 图片不入库。已经跟踪的 fig/method.png 不受这条影响
+# 图片不入库，方法示意图除外
 *.png
+!fig/method.png
 *.jpg
 *.jpeg
 *.gif
