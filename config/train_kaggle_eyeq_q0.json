@@ -1,0 +1,60 @@
+{
+  "name": "CDARL_kaggle_eyeq_q0",
+  "phase": "train",
+  "gpu_ids": [0],
+  "display_port": 8098,
+  "path": {
+    "log": "logs",
+    "tb_logger": "tb_logger",
+    "results": "results",
+    "checkpoint": "checkpoint",
+    "resume_state": null
+  },
+  "datasets": {
+    "train": {
+      "name": "KaggleEyeQ_q0",
+      "dataroot": "./data/Dataset_Kaggle_EyeQ_q0/",
+      "batch_size": 1,
+      "centered": true,
+      "num_workers": 4,
+      "use_shuffle": true,
+      "source_dir": "../data/kaggle/extracted/train"
+    }
+  },
+  "model": {
+    "finetune_norm": false,
+    "unet": {
+      "in_channel": 1,
+      "out_channel": 1,
+      "inner_channel": 64,
+      "channel_multiplier": [1, 1, 2, 2, 4, 4],
+      "attn_res": [16],
+      "res_blocks": 2,
+      "dropout": 0
+    },
+    "beta_schedule": {
+      "train": {"schedule": "linear", "n_timestep": 2000, "linear_start": 1e-06, "linear_end": 0.01},
+      "val": {"schedule": "linear", "n_timestep": 2000, "linear_start": 1e-06, "linear_end": 0.01}
+    },
+    "diffusion": {"image_size": 256, "channels": 1, "conditional": false}
+  },
+  "train": {
+    "n_epoch": 150,
+    "val_freq": 1000,
+    "save_checkpoint_epoch": 10000,
+    "print_freq": 100,
+    "lambda_NCE": 0.0004,
+    "optimizer": {"type": "adam", "lr": 1e-05},
+    "ema_scheduler": {"step_start_ema": 5000, "update_ema_every": 1, "ema_decay": 0.9999},
+    "max_steps": 100000,
+    "save_checkpoint_freq": 5000,
+    "diagnostic_freq": 1000,
+    "seed": 2026
+  },
+  "synthesis": {
+    "input_dir": "test_input",
+    "timesteps": [200, 800, 1600],
+    "seed": 2026,
+    "frequency": 5000
+  }
+}

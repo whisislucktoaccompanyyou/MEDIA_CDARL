@@ -70,7 +70,7 @@ def parse(args):
         opt['datasets']['val']['data_len'] = 3
 
     # validation in train phase
-    if phase == 'train':
+    if phase == 'train' and 'val' in opt['datasets']:
         opt['datasets']['val']['data_len'] = 3
 
     return opt

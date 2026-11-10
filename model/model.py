@@ -23,6 +23,10 @@ class CDARL(BaseModel):
         # set loss and load resume state
         self.set_loss()
         self.set_new_noise_schedule(opt['model']['beta_schedule']['train'], schedule_phase='train')
+        # PatchSampleF creates mlp_0/1/2 on the first forward, not in __init__.
+        # A resumed H checkpoint contains those layers, so build them before loading.
+        if self.opt['path']['resume_state'] and self.opt['phase'] == 'train':
+            self._init_contrastive_head(opt)
         self.load_network()
         if self.opt['phase'] == 'train':
             self.netG.train()
@@ -49,6 +53,16 @@ class CDARL(BaseModel):
 
     def feed_data(self, data):
         self.data = self.set_device(data)
+
+    def _init_contrastive_head(self, opt):
+        """Build PatchSampleF MLPs before loading a resumed H checkpoint."""
+        image_size = opt['model']['diffusion']['image_size']
+        channels = opt['model']['diffusion']['channels']
+        dummy = {
+            'A': torch.zeros(1, channels, image_size, image_size),
+            'F': torch.zeros(1, channels, image_size, image_size),
+        }
+        self.data_dependent_initalize(dummy, opt)
 
     def data_dependent_initalize(self, data, opt):
         self.data = self.set_device(data)
@@ -118,6 +132,17 @@ class CDARL(BaseModel):
         l_adv_G = self.netG.loss_gan(self.netD(self.synt_A), True) * h_alpha
         l_tot = l_dif + l_cyc + l_cont + l_adv_G
         l_tot.backward()
+        self.diagnostic_step = getattr(self, 'diagnostic_step', 0) + 1
+        freq = self.opt['train'].get('diagnostic_freq', 0)
+        if freq and (self.diagnostic_step == 1 or self.diagnostic_step % freq == 0):
+            with torch.no_grad():
+                grads = [p.grad.norm().item() for p in self.netH.parameters() if p.grad is not None]
+                self.log_dict['diag_H_grad_norm_sum'] = sum(grads)
+                self.log_dict['diag_feature_positive_negative_mae'] = float((feat_sf[0]-feat_sv[0]).abs().mean())
+                self.log_dict['diag_mask_V_std'] = float(self.mask_V.std())
+                self.log_dict['diag_mask_F_std'] = float(self.mask_F.std())
+                self.log_dict['diag_mask_V_foreground'] = float((self.mask_V>0).float().mean())
+                logger.info('Contrastive diagnostics: %s', dict(self.log_dict))
         self.optG.step()
         self.optH.step()
 
@@ -291,6 +316,6 @@ class CDARL(BaseModel):
             self.begin_step = optD['iter']
             self.begin_epoch = optD['epoch']
             optH = torch.load(optH_path)
-            self.optD.load_state_dict(optH['optimizer'])
+            self.optH.load_state_dict(optH['optimizer'])
             self.begin_step = optH['iter']
             self.begin_epoch = optH['epoch']

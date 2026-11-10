@@ -47,13 +47,20 @@ if __name__ == "__main__":
             training_iters = int(ceil(train_set.data_len / float(batchSize)))
             val_set = Data.create_dataset_xcad(dataset_opt, 'val')
             val_loader = Data.create_dataloader(val_set, dataset_opt, 'val')
-            valid_iters = int(ceil(val_set.data_len / float(batchSize)))
+            valid_iters = int(ceil(val_set.data_len / float(batchSize))) if val_set.data_len else 0
         if phase == 'test':
             val_set = Data.create_dataset_xcad(dataset_opt, 'test')
             val_loader = Data.create_dataloader(val_set, dataset_opt, phase)
             valid_iters = int(ceil(val_set.data_len))
     logger.info('Initial Dataset Finished')
 
+    # Reproducible model initialization and sampling.
+    import random
+    seed = opt['train'].get('seed', 2026)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
     # model
     diffusion = Model.create_model(opt)
     logger.info('Initial Model Finished')
@@ -69,7 +76,8 @@ if __name__ == "__main__":
     diffusion.set_new_noise_schedule(opt['model']['beta_schedule'][opt['phase']], schedule_phase=opt['phase'])
     val_dice = 0
     if opt['phase'] == 'train':
-        while current_epoch < n_epoch:
+        max_steps = opt['train'].get('max_steps') or float('inf')
+        while current_epoch < n_epoch and current_step < max_steps:
             current_epoch += 1
             for istep, train_data in enumerate(train_loader):
                 iter_start_time = time.time()
@@ -79,6 +87,15 @@ if __name__ == "__main__":
                     continue
                 diffusion.feed_data(train_data)
                 diffusion.optimize_parameters()
+                save_freq = opt['train'].get('save_checkpoint_freq')
+                if save_freq and current_step % save_freq == 0:
+                    diffusion.save_network(current_epoch, current_step)
+                synth = opt.get('synthesis')
+                if synth and (current_step == 2 or current_step % synth['frequency'] == 0):
+                    from synthesis_validation import validate
+                    net = diffusion.netG.module if isinstance(diffusion.netG, torch.nn.DataParallel) else diffusion.netG
+                    validate(net, synth['input_dir'], os.path.join(opt['path']['results'], 'step_%07d' % current_step), synth['timesteps'], synth['seed'])
+                    logger.info('Saved fixed-condition synthesis at step %d', current_step)
                 # log
                 if (istep+1) % opt['train']['print_freq'] == 0:
                     logs = diffusion.get_current_log()
@@ -93,13 +110,18 @@ if __name__ == "__main__":
                     visuals = diffusion.get_current_visuals(isTrain=False)
                     visualizer.display_current_results_step(visuals)
 
+                if current_step >= max_steps:
+                    break
+
             if current_epoch % opt['train']['save_checkpoint_epoch'] == 0:
                 logger.info('Saving models and training states.')
                 diffusion.save_network(current_epoch, current_step)
-                visualizer.display_current_results(visuals, current_epoch, True)
 
 
             dice_per_case_score = 0
+            if valid_iters == 0:
+                logger.info('No labeled validation split; skip Dice and keep training.')
+                continue
             for idata, val_data in enumerate(val_loader):
                 diffusion.feed_data(val_data)
                 diffusion.test()
@@ -118,7 +140,10 @@ if __name__ == "__main__":
                 val_dice = dice_case
                 diffusion.save_network(current_epoch, current_step, seg_save=True, dice=round(val_dice, 4))
 
-        # save model
+        # The periodic save only fires on epochs divisible by save_checkpoint_epoch.
+        # Always keep the last fundus weights as well.
+        logger.info('Saving final models and training states.')
+        diffusion.save_network(current_epoch, current_step)
         logger.info('End of training.')
     else:
         logger.info('Begin Model Evaluation.')

@@ -19,7 +19,7 @@ def create_dataloader(dataset, dataset_opt, phase):
 def create_dataset_xcad(dataset_opt, phase):
     '''create dataset'''
     from data.XCAD_dataset import XCADDataset as D
-    dataset = D(dataroot=dataset_opt['dataroot'], split=phase)
+    dataset = D(dataroot=dataset_opt['dataroot'], split=phase, source_dir=dataset_opt.get('source_dir'))
     logger = logging.getLogger('base')
     logger.info('Dataset [{:s} - {:s}] is created.'.format(dataset.__class__.__name__, dataset_opt['name']))
     return dataset

@@ -1,0 +1,24 @@
+data/
+experiments/
+__pycache__/
+*.pyc
+*.pyo
+*.log
+*.pid
+
+# 本地测试图和日志，不上传
+test_input/
+test_output/
+test_output_1/
+logs/
+logs_launch/
+
+# 图片不入库。已经跟踪的 fig/method.png 不受这条影响
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.tif
+*.tiff
+*.webp

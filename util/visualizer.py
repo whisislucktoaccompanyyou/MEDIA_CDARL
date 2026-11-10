@@ -3,9 +3,7 @@ import matplotlib.pyplot as plt
 import os
 import ntpath
 import time
-import ipdb
 from . import util
-from . import html
 import scipy.ndimage as ndimage
 
 
@@ -80,6 +78,7 @@ class Visualizer():
                     idx += 1
 
         if self.use_html and (save_result or not self.saved):  # save images to a html file
+            from . import html
             self.saved = True
             for label, image_numpy in visuals.items():
                 img_path = os.path.join(self.img_dir, 'epoch%.3d_%s.png' % (epoch, label))

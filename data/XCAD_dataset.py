@@ -7,7 +7,8 @@ import data.util as Util
 from PIL import Image
 
 class XCADDataset(Dataset):
-    def __init__(self, dataroot, split='train'):
+    def __init__(self, dataroot, split='train', source_dir=None):
+        self.source_dir = source_dir
         self.split = split
         self.imageNum = []
         self.dataroot = dataroot
@@ -17,15 +18,26 @@ class XCADDataset(Dataset):
             # 'trainB'= Image, 'trainC'=Background, 'trainA'=fractal label
             self.A_paths = sorted(glob.glob(os.path.join(dataroot, self.split, 'trainB', '*.png')))
             self.F_paths = sorted(glob.glob(os.path.join(dataroot, 'train', 'trainA', '*.png')))
+            if source_dir:
+                import json
+                with open(os.path.join(dataroot, 'split_manifest.json')) as f:
+                    manifest = json.load(f)
+                self.A_paths = [os.path.join(source_dir, name) for name in manifest['train']]
             self.data_len = len(self.A_paths)
             self.data_lenF = len(self.F_paths)
 
         elif split == 'val':
             dataPath = os.path.join(dataroot, 'test', 'images')
-            dataFiles = sorted(os.listdir(dataPath))[:12]
-            for isub, FileName in enumerate(dataFiles):
-                self.imageNum.append(FileName)
-            self.data_len = len(self.imageNum)
+            if not os.path.isdir(dataPath):
+                # Fundus training has no labeled XCAD-style test split.
+                # Keep the loader alive so training can start; Dice is skipped.
+                self.imageNum = []
+                self.data_len = 0
+            else:
+                dataFiles = sorted(os.listdir(dataPath))[:12]
+                for isub, FileName in enumerate(dataFiles):
+                    self.imageNum.append(FileName)
+                self.data_len = len(self.imageNum)
         else:
             if 'XCAD' in dataroot:
                 dataPath = os.path.join(dataroot, self.split, 'images')
@@ -72,16 +84,29 @@ class XCADDataset(Dataset):
     def __getitem__(self, index):
 
         if self.split == 'train':
-            self._shuffle_data_index()
+            if not self.source_dir:
+                self._shuffle_data_index()
             A_path = self.A_paths[index]
             F_path = self.F_paths[index % self.data_lenF]
 
             data_A = cv2.imread(A_path, cv2.IMREAD_GRAYSCALE).astype('float')/255.
             data_F = cv2.imread(F_path, cv2.IMREAD_GRAYSCALE).astype('float')/255.
 
+            if self.source_dir:
+                # Crop excess black border; preserve aspect ratio before author subsampling.
+                foreground = data_A > (10. / 255.)
+                ys, xs = np.where(foreground)
+                if len(xs):
+                    data_A = data_A[ys.min():ys.max()+1, xs.min():xs.max()+1]
+                h, w = data_A.shape
+                side = max(h, w)
+                data_A = cv2.copyMakeBorder(data_A, (side-h)//2, (side-h+1)//2, (side-w)//2, (side-w+1)//2, cv2.BORDER_CONSTANT, value=0)
+                data_A = cv2.resize(data_A, (512, 512), interpolation=cv2.INTER_AREA)
             data_A = self._random_subsample(data_A)
             data_F = self._random_subsample(data_F)
         else:
+            if self.data_len == 0:
+                raise IndexError('No validation images for this dataset')
             dataInfo = self.imageNum[index]
             dataPath = glob.glob(os.path.join(self.dataroot, 'test', 'images', dataInfo[:-4]+'*'))[0]
             data_A = cv2.imread(dataPath, cv2.IMREAD_GRAYSCALE).astype('float') / 255.
