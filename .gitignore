@@ -1,4 +1,6 @@
 data/
+
+# 实验目录（权重、日志）只留在本机，不上传
 experiments/
 __pycache__/
 *.pyc
