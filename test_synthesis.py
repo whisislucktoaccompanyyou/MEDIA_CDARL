@@ -32,6 +32,7 @@ def parse_args():
     parser.add_argument('--gpu', default='0')
     parser.add_argument('--seed', type=int, default=2026)
     parser.add_argument('--timesteps', type=int, nargs='+', default=[200,800,1600])
+    parser.add_argument('--no-match', action='store_true', help='skip FOV histogram matching')
     return parser.parse_args()
 
 
@@ -120,7 +121,10 @@ def main():
     print('pairs', len(pairs))
 
     from synthesis_validation import validate
-    validate(net, args.input_dir, args.output_dir, args.timesteps, args.seed)
+    validate(
+        net, args.input_dir, args.output_dir, args.timesteps, args.seed,
+        match=not args.no_match,
+    )
     print('saved', args.output_dir)
 
 
