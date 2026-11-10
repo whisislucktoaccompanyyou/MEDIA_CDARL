@@ -32,7 +32,8 @@ def parse_args():
     parser.add_argument('--gpu', default='0')
     parser.add_argument('--seed', type=int, default=2026)
     parser.add_argument('--timesteps', type=int, nargs='+', default=[200,800,1600])
-    parser.add_argument('--no-match', action='store_true', help='skip FOV histogram matching')
+    parser.add_argument('--match', action='store_true', help='save an extra FOV histogram-matched image')
+    parser.add_argument('--light', action='store_true', help='replace low-frequency illumination with the reference photo')
     return parser.parse_args()
 
 
@@ -123,7 +124,8 @@ def main():
     from synthesis_validation import validate
     validate(
         net, args.input_dir, args.output_dir, args.timesteps, args.seed,
-        match=not args.no_match,
+        match=args.match,
+        light=args.light,
     )
     print('saved', args.output_dir)
 

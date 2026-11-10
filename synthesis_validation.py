@@ -9,6 +9,8 @@ from test_synthesis import find_pairs, read_gray, to_model_tensor, tensor_to_u8,
 FORBIDDEN_OUTPUTS = {
     "kaggle_all_100k",
     "kaggle_eyeq_q0_100k（8k优质图像）",
+    "kaggle_all_100k_match",
+    "kaggle_eyeq_q0_100k_match",
 }
 
 
@@ -34,6 +36,29 @@ def panel(images):
 
 def fov_mask(image, threshold=8):
     return image > threshold
+
+
+def transfer_low_frequency(source, reference, fov, sigma=12):
+    """Replace only the broad illumination. Vessel-scale detail stays from source.
+
+    This uses the reference photo, so it diagnoses appearance. It does not show
+    that the model can produce this image from the mask alone.
+    """
+    source_f = source.astype(np.float32)
+    reference_f = reference.astype(np.float32)
+    source_low = cv2.GaussianBlur(source_f, (0, 0), sigma)
+    reference_low = cv2.GaussianBlur(reference_f, (0, 0), sigma)
+    detail = source_f - source_low
+    # Detail was learned in a darker range. Scale it into the reference range
+    # before adding, otherwise vessels stay faint after the background is lifted.
+    source_std = float(source_f[fov].std()) if int(fov.sum()) > 10 else 0.0
+    reference_std = float(reference_f[fov].std()) if int(fov.sum()) > 10 else 0.0
+    scale = reference_std / source_std if source_std > 1 else 1.0
+    scale = float(np.clip(scale, 0.5, 3.0))
+    fused = reference_low + detail * scale
+    outside = np.logical_not(fov)
+    fused[outside] = 0
+    return np.clip(fused, 0, 255).astype(np.uint8), scale
 
 
 def histogram_match(source, reference, fov):
@@ -127,6 +152,9 @@ def print_summary(summary):
         "matched_mean", "matched_fov_mae", "matched_fov_mean_gap",
         "matched_vessel_contrast", "matched_edge_grad_ratio",
         "matched_disc_circularity", "matched_disc_bulge",
+        "light_mean", "light_fov_mae", "light_fov_mean_gap",
+        "light_vessel_contrast", "light_edge_grad_ratio",
+        "light_disc_circularity", "light_disc_bulge",
         "condition_change_mae",
     ]
     for block in summary:
@@ -136,7 +164,7 @@ def print_summary(summary):
                 print("  %s=%.4f" % (key, block["mean"][key]))
 
 
-def validate(net, input_dir, output_dir, timesteps, seed=2026, match=False):
+def validate(net, input_dir, output_dir, timesteps, seed=2026, match=False, light=False):
     if os.path.basename(os.path.abspath(output_dir)) in FORBIDDEN_OUTPUTS:
         raise RuntimeError("refusing to write into an existing result folder: " + output_dir)
     os.makedirs(output_dir, exist_ok=True)
@@ -179,14 +207,20 @@ def validate(net, input_dir, output_dir, timesteps, seed=2026, match=False):
                     dice = (2 * (pred & target).sum().float() + 1e-6) / (pred.sum() + target.sum() + 1e-6)
                     u8 = tensor_to_u8(synthetic)
                     raw_metrics = appearance(u8, original_256, mask_256)
-                    matched = histogram_match(u8, original_256, fov_mask(original_256)) if match else None
+                    field = fov_mask(original_256)
+                    matched = histogram_match(u8, original_256, field) if match else None
                     matched_metrics = appearance(matched, original_256, mask_256) if matched is not None else {}
+                    lit, light_scale = transfer_low_frequency(u8, original_256, field) if light else (None, None)
+                    light_metrics = appearance(lit, original_256, mask_256) if lit is not None else {}
                     prefix = os.path.join(output_dir, stem + "_t" + str(t))
                     save_gray(prefix + "_synthetic.png", u8)
                     columns = [original, mask_256 * 255, u8]
                     if matched is not None:
                         save_gray(prefix + "_matched.png", matched)
                         columns.append(matched)
+                    if lit is not None:
+                        save_gray(prefix + "_light.png", lit)
+                        columns.append(lit)
                     save_gray(prefix + "_panel.png", panel(columns))
                     row = dict(
                         id=stem,
@@ -200,14 +234,18 @@ def validate(net, input_dir, output_dir, timesteps, seed=2026, match=False):
                     )
                     row.update(prefixed(raw_metrics, "raw_"))
                     row.update(prefixed(matched_metrics, "matched_"))
+                    row.update(prefixed(light_metrics, "light_"))
+                    if light_scale is not None:
+                        row["light_detail_scale"] = light_scale
                     report.append(row)
     finally:
         net.train(training)
     summary = summarize(report) if report else []
     note = (
         "cycle_dice uses the same trained segmenter and is not an accuracy measure. "
-        "raw_* is the model output. matched_* is histogram matching inside the original FOV; "
-        "it does not change weights. disc_circularity closer to orig_disc_circularity is rounder; "
+        "raw_* is the model output. matched_* is histogram matching inside the original FOV. "
+        "light_* replaces only low-frequency illumination with the reference photo and keeps model detail. "
+        "Neither changes weights. disc_circularity closer to orig_disc_circularity is rounder; "
         "disc_bulge is the fraction of the disc outside its fitted ellipse."
     )
     with open(os.path.join(output_dir, "synthesis_report.json"), "w") as handle:
