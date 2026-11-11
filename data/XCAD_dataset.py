@@ -1,15 +1,17 @@
+import csv
 import glob
 import numpy as np
 import os, os.path
 import cv2
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, WeightedRandomSampler
 import data.util as Util
 from PIL import Image
 
 class XCADDataset(Dataset):
-    def __init__(self, dataroot, split='train', source_dir=None):
+    def __init__(self, dataroot, split='train', source_dir=None, quality_csv=None, quality_weights=None):
         self.source_dir = source_dir
         self.split = split
+        self.sample_weights = None
         self.imageNum = []
         self.dataroot = dataroot
         self.data_idx = -1
@@ -23,6 +25,7 @@ class XCADDataset(Dataset):
                 with open(os.path.join(dataroot, 'split_manifest.json')) as f:
                     manifest = json.load(f)
                 self.A_paths = [os.path.join(source_dir, name) for name in manifest['train']]
+                self.sample_weights = self._quality_weights(manifest['train'], quality_csv, quality_weights)
             self.data_len = len(self.A_paths)
             self.data_lenF = len(self.F_paths)
 
@@ -54,6 +57,21 @@ class XCADDataset(Dataset):
             self.data_len = len(self.imageNum)
 
         self.inputSize = 256
+
+    def _quality_weights(self, names, quality_csv, quality_weights):
+        if not quality_csv or not quality_weights:
+            return None
+        grades = {}
+        with open(quality_csv, newline='') as handle:
+            for row in csv.reader(handle):
+                if not row or row[0] == '' or row[1] == 'image':
+                    continue
+                grades[row[1].strip()] = row[2].strip()
+        default = float(quality_weights.get('default', 0.3))
+        weights = [float(quality_weights.get(grades.get(name, ''), default)) for name in names]
+        if not any(weight > 0 for weight in weights):
+            raise RuntimeError('all quality sample weights are zero')
+        return weights
 
     def _random_subsample(self, data):
         opt1 = np.random.randint(0,2)

@@ -130,7 +130,8 @@ class CDARL(BaseModel):
             l_cont += loss.mean()
 
         l_adv_G = self.netG.loss_gan(self.netD(self.synt_A), True) * h_alpha
-        l_tot = l_dif + l_cyc + l_cont + l_adv_G
+        appearance = self._appearance_losses(self.data['A'], self.synt_A, self.data['F'])
+        l_tot = l_dif + l_cyc + l_cont + l_adv_G + appearance['total']
         l_tot.backward()
         self.diagnostic_step = getattr(self, 'diagnostic_step', 0) + 1
         freq = self.opt['train'].get('diagnostic_freq', 0)
@@ -153,6 +154,56 @@ class CDARL(BaseModel):
         self.log_dict['l_cont'] = l_cont.item()
         self.log_dict['l_adv_G'] = l_adv_G.item()
         self.log_dict['l_adv_D'] = l_adv_D.item()
+        for key, value in appearance.items():
+            self.log_dict['l_' + key] = value.item()
+
+    def _appearance_losses(self, real, synthetic, fractal):
+        """Small constraints on vessel contrast, disc rim, brightness, and texture.
+
+        The fractal mask is the only vessel condition available for synt_A.
+        Weights are relative to the existing total loss and default to zero.
+        """
+        weights = self.opt['train'].get('appearance') or {}
+        zero = real.new_zeros(())
+        losses = {'vessel': zero, 'rim': zero, 'tone': zero, 'texture': zero, 'total': zero}
+        if not any(float(weights.get(key, 0)) for key in ('vessel', 'rim', 'tone', 'texture')):
+            return losses
+        real_01 = (real[:, :1] + 1) * 0.5
+        fake_01 = (synthetic[:, :1] + 1) * 0.5
+        vessel = fractal[:, :1] > 0
+        kernel = torch.ones(1, 1, 11, 11, device=real.device)
+        neighbor = torch.nn.functional.conv2d(vessel.float(), kernel, padding=5).clamp(max=1)
+        background = neighbor - vessel.float() > 0.5
+        if vessel.any() and background.any():
+            real_gap = real_01[vessel].mean() - real_01[background].mean()
+            fake_gap = fake_01[vessel].mean() - fake_01[background].mean()
+            losses['vessel'] = (fake_gap - real_gap.detach()).abs()
+        yy = torch.linspace(-1, 1, real.shape[-2], device=real.device)
+        xx = torch.linspace(-1, 1, real.shape[-1], device=real.device)
+        radius = torch.sqrt(yy[:, None] ** 2 + xx[None, :] ** 2)
+        outside = (radius > 0.96).view(1, 1, *radius.shape)
+        rim = ((radius > 0.84) & (radius <= 0.96)).view(1, 1, *radius.shape)
+        if outside.any():
+            losses['rim'] = fake_01[outside].mean()
+        if rim.any():
+            losses['rim'] = losses['rim'] + (fake_01[rim].mean() - real_01[rim].mean().detach()).abs()
+        field = (radius <= 0.96).view(1, 1, *radius.shape)
+        nonvessel = field & ~vessel
+        if nonvessel.any():
+            real_bg = real_01[nonvessel]
+            fake_bg = fake_01[nonvessel]
+            real_hist = torch.histc(real_bg.detach(), bins=16, min=0, max=1)
+            fake_hist = torch.histc(fake_bg, bins=16, min=0, max=1)
+            real_hist = real_hist / real_hist.sum().clamp_min(1)
+            fake_hist = fake_hist / fake_hist.sum().clamp_min(1)
+            losses['tone'] = (fake_hist - real_hist).abs().mean()
+            blur = torch.nn.functional.avg_pool2d(fake_01, 7, stride=1, padding=3)
+            real_blur = torch.nn.functional.avg_pool2d(real_01, 7, stride=1, padding=3)
+            fake_var = (fake_01 - blur).pow(2)
+            real_var = (real_01 - real_blur).pow(2)
+            losses['texture'] = (fake_var[nonvessel].mean() - real_var[nonvessel].mean().detach()).abs()
+        losses['total'] = sum(losses[key] * float(weights.get(key, 0)) for key in ('vessel', 'rim', 'tone', 'texture'))
+        return losses
 
     def test(self):
         self.netG.eval()
@@ -271,8 +322,27 @@ class CDARL(BaseModel):
         opt_state = {'epoch': epoch, 'iter': iter_step, 'scheduler': None, 'optimizer': None}
         opt_state['optimizer'] = self.optH.state_dict()
         torch.save(opt_state, optH_path)
+        self._prune_checkpoints()
 
         logger.info('Saved model in [{:s}] ...'.format(G_path))
+
+    def _prune_checkpoints(self):
+        keep = self.opt['train'].get('keep_checkpoints')
+        if not keep or keep < 1:
+            return
+        directory = self.opt['path']['checkpoint']
+        groups = {}
+        for name in os.listdir(directory):
+            if not name.endswith('_G.pth') or name.startswith('D'):
+                continue
+            prefix = name[:-len('_G.pth')]
+            path = os.path.join(directory, name)
+            groups[prefix] = os.path.getmtime(path)
+        for prefix in sorted(groups, key=groups.get, reverse=True)[keep:]:
+            for suffix in ('_G.pth', '_H.pth', '_Da.pth', '_optG.pth', '_optD.pth', '_optH.pth'):
+                path = os.path.join(directory, prefix + suffix)
+                if os.path.isfile(path):
+                    os.remove(path)
 
     def load_network(self):
         load_path = self.opt['path']['resume_state']

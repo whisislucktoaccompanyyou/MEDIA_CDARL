@@ -77,6 +77,9 @@ if __name__ == "__main__":
     val_dice = 0
     if opt['phase'] == 'train':
         max_steps = opt['train'].get('max_steps') or float('inf')
+        extra_steps = opt['train'].get('extra_steps')
+        if extra_steps:
+            max_steps = current_step + extra_steps
         while current_epoch < n_epoch and current_step < max_steps:
             current_epoch += 1
             for istep, train_data in enumerate(train_loader):
