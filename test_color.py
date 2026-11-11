@@ -3,13 +3,15 @@
 import argparse
 import os
 import sys
+from datetime import datetime
 
 import cv2
+import numpy as np
 import torch
 
 import core.logger as Logger
 from model.color_head import ColorHead
-from train_color import lab_to_bgr, load_frozen_generator, synthesize_feature
+from train_color import fundus_mask, lab_to_bgr, load_frozen_generator, synthesize_feature
 
 
 def parse_args():
@@ -21,7 +23,7 @@ def parse_args():
     )
     parser.add_argument('--head', required=True, help='color_head_XXXXXX.pth')
     parser.add_argument('--input_dir', default='test_input')
-    parser.add_argument('--output_dir', default='test_output_color')
+    parser.add_argument('--output_dir', default='')
     parser.add_argument('--gpu', default='0')
     parser.add_argument('--timestep', type=int, default=200)
     parser.add_argument('--seed', type=int, default=2026)
@@ -42,6 +44,10 @@ def main():
     head.load_state_dict(state['head'])
     head.eval()
 
+    if not args.output_dir:
+        args.output_dir = os.path.join(
+            'test_output_color', datetime.now().strftime('%Y%m%d_%H%M%S')
+        )
     names = sorted(name for name in os.listdir(args.input_dir) if name.endswith('_image.png'))
     if not names:
         raise RuntimeError('no *_image.png in {}'.format(args.input_dir))
@@ -62,8 +68,11 @@ def main():
                 net, tensor, mask > 127, args.timestep, generator
             )
             ab = head(feature)
+        bgr = lab_to_bgr(luminance[0, 0], ab[0])
+        outside = fundus_mask(gray) < 0.5
+        bgr[np.repeat(outside[:, :, None], 3, axis=2)] = 0
         out = os.path.join(args.output_dir, stem + '_color.png')
-        if not cv2.imwrite(out, lab_to_bgr(luminance[0, 0], ab[0])):
+        if not cv2.imwrite(out, bgr):
             raise RuntimeError('cannot write {}'.format(out))
         print('saved', out, flush=True)
 

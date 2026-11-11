@@ -57,6 +57,36 @@ def bgr_to_lab_ab(image_bgr):
     return lab[:, :, 1].astype(np.float32), lab[:, :, 2].astype(np.float32)
 
 
+def vessel_mask_from_gray(gray):
+    """Dark vessels of this photo. The fractal mask is a different eye and cannot be the color target."""
+    blur = cv2.GaussianBlur(gray, (0, 0), 2)
+    blackhat = cv2.morphologyEx(blur, cv2.MORPH_BLACKHAT, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15)))
+    _, mask = cv2.threshold(blackhat, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
+    return mask > 0
+
+
+def color_target(color_bgr, gray, field):
+    """Background chroma from this photo; vessel red painted only on this photo's vessels.
+
+    Outside the fundus circle a/b stay neutral, so the corners cannot turn red or blue.
+    """
+    a, b = bgr_to_lab_ab(color_bgr)
+    vessel = vessel_mask_from_gray(gray) & (field > 0.5)
+    background = (field > 0.5) & ~vessel
+    if background.any():
+        a_bg = cv2.GaussianBlur(np.where(background, a, np.median(a[background])).astype(np.float32), (0, 0), 11)
+        b_bg = cv2.GaussianBlur(np.where(background, b, np.median(b[background])).astype(np.float32), (0, 0), 11)
+    else:
+        a_bg, b_bg = a, b
+    # OpenCV Lab: a above 128 is red. Real fundus vessels sit a little above the background.
+    a = np.where(vessel, np.minimum(a_bg + 14.0, 185.0), a_bg)
+    b = np.where(vessel, b_bg, b_bg)
+    a = np.where(field > 0.5, a, 128.0)
+    b = np.where(field > 0.5, b, 128.0)
+    return a.astype(np.float32), b.astype(np.float32)
+
+
 def fundus_mask(gray_u8):
     blur = cv2.GaussianBlur(gray_u8, (0, 0), 3)
     foreground = blur > 12
@@ -76,13 +106,8 @@ class ColorDataset(torch.utils.data.Dataset):
         with open(os.path.join(dataroot, 'split_manifest.json')) as handle:
             manifest = json.load(handle)
         self.paths = [os.path.join(source_dir, name) for name in manifest['train']]
-        self.fractal_paths = sorted(
-            name for name in os.listdir(os.path.join(dataroot, 'train', 'trainA'))
-            if name.endswith('.png')
-        )
-        self.fractal_dir = os.path.join(dataroot, 'train', 'trainA')
-        if not self.paths or not self.fractal_paths:
-            raise RuntimeError('empty color training list or fractal masks')
+        if not self.paths:
+            raise RuntimeError('empty color training list')
 
     def __len__(self):
         return len(self.paths)
@@ -114,17 +139,14 @@ class ColorDataset(torch.utils.data.Dataset):
         opt1, opt2 = np.random.randint(0, 2), np.random.randint(0, 2)
         gray = gray[opt1::2, opt2::2]
         color = color[opt1::2, opt2::2]
-        a, b = bgr_to_lab_ab(color)
         field = fundus_mask(gray)
-        fractal_name = self.fractal_paths[np.random.randint(0, len(self.fractal_paths))]
-        fractal = cv2.imread(os.path.join(self.fractal_dir, fractal_name), cv2.IMREAD_GRAYSCALE)
-        fractal = cv2.resize(fractal, (512, 512), interpolation=cv2.INTER_NEAREST)
-        fractal = fractal[opt1::2, opt2::2]
+        a, b = color_target(color, gray, field)
+        vessel = vessel_mask_from_gray(gray) & (field > 0.5)
         luminance = torch.from_numpy(gray.astype(np.float32) / 255.0 * 2.0 - 1.0).unsqueeze(0)
         target = torch.from_numpy(np.stack([a, b], axis=0))
         field = torch.from_numpy(field).unsqueeze(0)
-        fractal = torch.from_numpy((fractal > 127).astype(np.float32))
-        return {'A': luminance, 'AB': target, 'field': field, 'F': fractal, 'P': path}
+        vessel = torch.from_numpy(vessel.astype(np.float32))
+        return {'A': luminance, 'AB': target, 'field': field, 'F': vessel, 'P': path}
 
 
 def lab_to_bgr(luminance_tanh, ab):
@@ -168,6 +190,8 @@ def save_preview(net, head, preview_dir, out_dir, device, step):
             luminance, feature = synthesize_feature(net, tensor, mask > 127, 200)
             ab = head(feature)
         bgr = lab_to_bgr(luminance[0, 0], ab[0])
+        outside = fundus_mask(gray) < 0.5
+        bgr[np.repeat(outside[:, :, None], 3, axis=2)] = 0
         cv2.imwrite(os.path.join(out_dir, '{}_step{:06d}.png'.format(stem, step)), bgr)
 
 
@@ -207,7 +231,10 @@ def main():
                 fractal = batch['F'].numpy()[0] > 0.5
                 synthetic, feature = synthesize_feature(net, luminance, fractal, int(timestep))
             predicted = head(feature)
-            weight = field.expand_as(predicted)
+            # Corners are neutral and must not be learned from the black surround.
+            predicted = predicted * field + 128.0 * (1.0 - field)
+            vessel = (batch['F'].to(device) > 0.5).float()
+            weight = field.expand_as(predicted) * torch.where(vessel.unsqueeze(1) > 0.5, 4.0, 1.0)
             loss = (predicted - target).abs().mul(weight).sum() / weight.sum().clamp_min(1.0)
             optimizer.zero_grad()
             loss.backward()
