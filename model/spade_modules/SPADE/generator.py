@@ -61,6 +61,7 @@ class SPADEGenerator(BaseNetwork):
         conv_img = [nn.ReflectionPad2d(3),
                       nn.Conv2d(nf, output_nc, kernel_size=7, padding=0)]
         self.conv_img = nn.Sequential(*conv_img)
+        self.return_features = False
 
     def compute_latent_vector_size(self, num_upsampling_layers, crop_size, aspect_ratio):
         if num_upsampling_layers == 'normal':
@@ -92,7 +93,8 @@ class SPADEGenerator(BaseNetwork):
         x = self.up_0(x, seg)
         x = self.up(x)
         x = self.up_1(x, seg)
-        x = self.conv_img(F.leaky_relu(x, 2e-1))
-        x = torch.tanh(x)
-
+        feat = F.leaky_relu(x, 2e-1)
+        x = torch.tanh(self.conv_img(feat))
+        if self.return_features:
+            return x, feat
         return x
