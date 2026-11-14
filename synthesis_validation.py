@@ -14,7 +14,7 @@ FORBIDDEN_OUTPUTS = {
 }
 
 
-def mask_classes(mask, size=256, threshold=0.5):
+def mask_classes(mask, size=384, threshold=0.5):
     values = mask.astype(np.float32)
     if values.max() > 1:
         values /= 255.0
@@ -164,6 +164,23 @@ def print_summary(summary):
                 print("  %s=%.4f" % (key, block["mean"][key]))
 
 
+def condition_from_mask(mask, size):
+    """Vessel, background, empty disc, fundus circle. Disc is not in the test mask."""
+    binary = mask_classes(mask, size=size)
+    yy, xx = np.ogrid[:size, :size]
+    circle = ((xx - (size - 1) / 2.0) ** 2 + (yy - (size - 1) / 2.0) ** 2) <= ((size * 0.48) ** 2)
+    vessel = binary > 0
+    background = np.logical_and(circle, np.logical_not(vessel))
+    disc = np.zeros((size, size), dtype=np.float32)
+    stacked = np.stack([
+        vessel.astype(np.float32),
+        background.astype(np.float32),
+        disc,
+        circle.astype(np.float32),
+    ], axis=0)
+    return torch.from_numpy(stacked).unsqueeze(0)
+
+
 def validate(net, input_dir, output_dir, timesteps, seed=2026, match=False, light=False):
     if os.path.basename(os.path.abspath(output_dir)) in FORBIDDEN_OUTPUTS:
         raise RuntimeError("refusing to write into an existing result folder: " + output_dir)
@@ -182,12 +199,18 @@ def validate(net, input_dir, output_dir, timesteps, seed=2026, match=False, ligh
                 original, mask = read_gray(ip), read_gray(mp)
                 if original.shape != mask.shape:
                     raise ValueError("Image/mask shape mismatch: " + stem)
-                image = to_model_tensor(original).to(device)
-                classes = torch.from_numpy(mask_classes(mask)).long().unsqueeze(0).to(device)
-                condition = torch.nn.functional.one_hot(classes, 2).permute(0, 3, 1, 2).float()
+                size = int(getattr(net, 'image_size', 256))
+                image = to_model_tensor(original, size=size).to(device)
+                label_nc = int(getattr(getattr(net, 'segment_fn', None), 'label_nc', 2))
+                if label_nc == 4:
+                    condition = condition_from_mask(mask, size).to(device)
+                    classes = torch.from_numpy(mask_classes(mask, size=size)).long().unsqueeze(0).to(device)
+                else:
+                    classes = torch.from_numpy(mask_classes(mask, size=size)).long().unsqueeze(0).to(device)
+                    condition = torch.nn.functional.one_hot(classes, 2).permute(0, 3, 1, 2).float()
                 noise = torch.randn(image.shape, generator=generator, device=device)
-                original_256 = cv2.resize(original, (256, 256), interpolation=cv2.INTER_AREA)
-                mask_256 = mask_classes(mask)
+                original_256 = cv2.resize(original, (size, size), interpolation=cv2.INTER_AREA)
+                mask_256 = mask_classes(mask, size=size)
                 reference_circularity, _ = disc_shape(original_256)
                 for t in timesteps:
                     if not 0 <= t < net.num_timesteps:

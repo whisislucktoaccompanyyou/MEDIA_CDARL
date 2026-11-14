@@ -58,7 +58,7 @@ def read_gray(path):
     return image
 
 
-def to_model_tensor(image, size=256):
+def to_model_tensor(image, size=384):
     # Training reads 512 grayscale, divides by 255, then randomly subsamples
     # by 2 to 256. Test uses one deterministic resize to that same size.
     resized = cv2.resize(image, (size, size), interpolation=cv2.INTER_AREA)

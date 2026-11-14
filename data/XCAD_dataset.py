@@ -8,8 +8,10 @@ import data.util as Util
 from PIL import Image
 
 class XCADDataset(Dataset):
-    def __init__(self, dataroot, split='train', source_dir=None, quality_csv=None, quality_weights=None):
+    def __init__(self, dataroot, split='train', source_dir=None, quality_csv=None, quality_weights=None,
+                 condition_dir=None, image_size=256):
         self.source_dir = source_dir
+        self.condition_dir = condition_dir
         self.split = split
         self.sample_weights = None
         self.imageNum = []
@@ -56,7 +58,7 @@ class XCADDataset(Dataset):
                 self.imageNum.append(FileName)
             self.data_len = len(self.imageNum)
 
-        self.inputSize = 256
+        self.inputSize = int(image_size)
 
     def _quality_weights(self, names, quality_csv, quality_weights):
         if not quality_csv or not quality_weights:
@@ -111,7 +113,7 @@ class XCADDataset(Dataset):
             data_F = cv2.imread(F_path, cv2.IMREAD_GRAYSCALE).astype('float')/255.
 
             if self.source_dir:
-                # Crop excess black border; preserve aspect ratio before author subsampling.
+                # Keep the whole fundus circle. Do not subsample every other pixel.
                 foreground = data_A > (10. / 255.)
                 ys, xs = np.where(foreground)
                 if len(xs):
@@ -119,10 +121,14 @@ class XCADDataset(Dataset):
                 h, w = data_A.shape
                 side = max(h, w)
                 data_A = cv2.copyMakeBorder(data_A, (side-h)//2, (side-h+1)//2, (side-w)//2, (side-w+1)//2, cv2.BORDER_CONSTANT, value=0)
-                data_A = cv2.resize(data_A, (512, 512), interpolation=cv2.INTER_AREA)
-            data_A = self._random_subsample(data_A)
-            data_F = self._random_subsample(data_F)
+                data_A = cv2.resize(data_A, (self.inputSize, self.inputSize), interpolation=cv2.INTER_AREA)
+                data_F = cv2.resize(data_F, (self.inputSize, self.inputSize), interpolation=cv2.INTER_NEAREST)
+            else:
+                data_A = self._random_subsample(data_A)
+                data_F = self._random_subsample(data_F)
+            condition = self._load_condition(A_path) if self.condition_dir else None
         else:
+            condition = None
             if self.data_len == 0:
                 raise IndexError('No validation images for this dataset')
             dataInfo = self.imageNum[index]
@@ -132,6 +138,40 @@ class XCADDataset(Dataset):
             data_F = cv2.imread(labelPath, cv2.IMREAD_GRAYSCALE).astype('float') / 255.
 
             A_path = dataInfo
+        sample = {'P': A_path, 'Index': index}
+        if self.split == 'train' and self.condition_dir:
+            sample['C'] = condition
         [data_A, data_F] = Util.transform_augment([data_A, data_F], split=self.split, min_max=(-1, 1))
+        sample['A'] = data_A
+        sample['F'] = data_F
+        return sample
 
-        return {'A': data_A, 'F': data_F, 'P':A_path, 'Index': index}
+    def _load_condition(self, image_path):
+        """4-channel condition: vessel, background, optic disc, fundus circle. Values in 0..1."""
+        stem = os.path.splitext(os.path.basename(image_path))[0]
+        size = (self.inputSize, self.inputSize)
+
+        def read(kind):
+            path = os.path.join(self.condition_dir, kind, stem + '.png')
+            image = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+            if image is None:
+                raise RuntimeError('missing condition {} for {}'.format(kind, stem))
+            if image.shape[:2] != size:
+                image = cv2.resize(image, size, interpolation=cv2.INTER_NEAREST)
+            return (image.astype(np.float32) / 255.0) > 0.5
+
+        vessel = read('vessels')
+        disc = read('disc')
+        circle = read('circle')
+        background = np.logical_and(circle, np.logical_not(vessel))
+        stacked = np.stack([
+            vessel.astype(np.float32),
+            background.astype(np.float32),
+            disc.astype(np.float32),
+            circle.astype(np.float32),
+        ], axis=0)
+        return torch_from_numpy(stacked)
+
+def torch_from_numpy(array):
+    import torch
+    return torch.from_numpy(np.ascontiguousarray(array)).float()

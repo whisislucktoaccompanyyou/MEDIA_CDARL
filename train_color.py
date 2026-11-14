@@ -1,8 +1,7 @@
-"""Train a Lab a/b head on a frozen C-DARL generator.
+"""Color head is disabled.
 
-The generator weights are loaded and not updated. Luminance still comes from
-the existing SPADE output. This script does not call the grayscale training
-loop and does not overwrite that checkpoint.
+The previous run froze the generator and trained only a Lab a/b head.
+That freeze is off. Do not launch this script.
 """
 
 import argparse
@@ -38,17 +37,9 @@ def parse_args():
 
 
 def load_frozen_generator(opt, weight):
-    opt['phase'] = 'test'
-    opt['path']['resume_state'] = weight
-    if not os.path.isfile(weight + '_G.pth'):
-        raise RuntimeError('missing generator weight {}'.format(weight + '_G.pth'))
-    diffusion = Model.create_model(opt)
-    net = diffusion.netG.module if isinstance(diffusion.netG, torch.nn.DataParallel) else diffusion.netG
-    net.eval()
-    for param in net.parameters():
-        param.requires_grad = False
-    net.segment_fn.return_features = True
-    return net
+    raise RuntimeError(
+        'color head is off. The generator path is not frozen and this script does not train.'
+    )
 
 
 def bgr_to_lab_ab(image_bgr):

@@ -77,13 +77,18 @@ class CDARL(BaseModel):
         
         self.optH = torch.optim.Adam(self.netH.parameters(), lr=opt['train']["optimizer"]["lr"], betas=(0.5, 0.999))
 
+    def _gan(self, prediction, target_is_real):
+        if isinstance(prediction, list):
+            return sum(self.netG.loss_gan(item, target_is_real) for item in prediction) / len(prediction)
+        return self.netG.loss_gan(prediction, target_is_real)
+
     def backward_D_basic(self, netD, real, fake):
         # Real
         pred_real = netD(real)
-        loss_D_real = self.netG.loss_gan(pred_real, True)
+        loss_D_real = self._gan(pred_real, True)
         # Fake
         pred_fake = netD(fake.detach())
-        loss_D_fake = self.netG.loss_gan(pred_fake, False)
+        loss_D_fake = self._gan(pred_fake, False)
         # Combined loss and calculate gradients
         loss_D = (loss_D_real + loss_D_fake) * 0.5
         return loss_D
@@ -129,9 +134,11 @@ class CDARL(BaseModel):
             loss = crit(f_q, f_sf, f_sv) * self.opt['train']['lambda_NCE']
             l_cont += loss.mean()
 
-        l_adv_G = self.netG.loss_gan(self.netD(self.synt_A), True) * h_alpha
+        l_adv_G = self._gan(self.netD(self.synt_A), True) * h_alpha
+        # The jump config does not set appearance weights, so those four terms stay zero.
         appearance = self._appearance_losses(self.data['A'], self.synt_A, self.data['F'])
-        l_tot = l_dif + l_cyc + l_cont + l_adv_G + appearance['total']
+        l_perc = self._perceptual_loss(self.data['A'], self.synt_A)
+        l_tot = l_dif + l_cyc + l_cont + l_adv_G + appearance['total'] + l_perc
         l_tot.backward()
         self.diagnostic_step = getattr(self, 'diagnostic_step', 0) + 1
         freq = self.opt['train'].get('diagnostic_freq', 0)
@@ -154,8 +161,31 @@ class CDARL(BaseModel):
         self.log_dict['l_cont'] = l_cont.item()
         self.log_dict['l_adv_G'] = l_adv_G.item()
         self.log_dict['l_adv_D'] = l_adv_D.item()
+        self.log_dict['l_perc'] = l_perc.item()
         for key, value in appearance.items():
             self.log_dict['l_' + key] = value.item()
+
+    def _perceptual_loss(self, real, synthetic):
+        weight = float(self.opt['train'].get('lambda_perc') or 0)
+        if weight <= 0:
+            return real.new_zeros(())
+        if not hasattr(self, '_vgg'):
+            from torchvision.models import vgg16, VGG16_Weights
+            vgg = vgg16(weights=VGG16_Weights.IMAGENET1K_V1).features[:16].eval()
+            for param in vgg.parameters():
+                param.requires_grad = False
+            self._vgg = vgg.to(real.device)
+            mean = real.new_tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
+            std = real.new_tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
+            self._vgg_mean = mean
+            self._vgg_std = std
+
+        def prep(image):
+            gray = (image[:, :1] + 1) * 0.5
+            rgb = gray.repeat(1, 3, 1, 1)
+            return (rgb - self._vgg_mean) / self._vgg_std
+
+        return torch.nn.functional.l1_loss(self._vgg(prep(synthetic)), self._vgg(prep(real)).detach()) * weight
 
     def _appearance_losses(self, real, synthetic, fractal):
         """Small constraints on vessel contrast, disc rim, brightness, and texture.

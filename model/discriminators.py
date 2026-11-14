@@ -45,3 +45,16 @@ class NLayerDiscriminator(nn.Module):
     def forward(self, input):
         """Standard forward."""
         return self.model(input)
+
+
+class MultiscaleDiscriminator(nn.Module):
+    """Full resolution and 1/2 resolution. Both see the same image."""
+
+    def __init__(self, input_nc):
+        super(MultiscaleDiscriminator, self).__init__()
+        self.full = NLayerDiscriminator(input_nc)
+        self.down = NLayerDiscriminator(input_nc)
+        self.pool = nn.AvgPool2d(3, stride=2, padding=1, count_include_pad=False)
+
+    def forward(self, input):
+        return [self.full(input), self.down(self.pool(input))]

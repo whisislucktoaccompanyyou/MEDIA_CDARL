@@ -19,12 +19,12 @@ class SPADEGenerator(BaseNetwork):
 
         return parser
 
-    def __init__(self, input_nc, output_nc, num_upsampling_layers='normal', crop_size=256, aspect_ratio=1):
+    def __init__(self, input_nc, output_nc, num_upsampling_layers='normal', crop_size=256, aspect_ratio=1, label_nc=2):
         super().__init__()
         # self.opt = opt
         nf = 64
         norm_G = 'spectralinstance'
-        label_nc = 2
+        self.label_nc = label_nc
         self.num_upsampling_layers = num_upsampling_layers
         self.sw, self.sh = self.compute_latent_vector_size(num_upsampling_layers, crop_size, aspect_ratio)
         norm_layer = nn.InstanceNorm2d

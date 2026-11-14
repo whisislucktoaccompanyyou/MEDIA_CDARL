@@ -7,6 +7,8 @@ if [ ! -x "$PYTHON" ]; then
     echo "Python missing: $PYTHON" >&2
     exit 1
 fi
+echo 'Color head is off. The generator is not frozen. Use run_train_jump.sh.' >&2
+exit 1
 if [ "${1:-}" = "--worker" ]; then
     exec 9>logs_launch/train_color.lock
     flock -n 9 || { echo 'Color head already running'; exit 1; }

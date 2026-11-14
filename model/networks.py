@@ -95,7 +95,7 @@ def define_G(opt):
         dropout=model_opt['unet']['dropout'],
         image_size=model_opt['diffusion']['image_size']
     )
-    model_gen = SPADEGenerator(2, 1) 
+    model_gen = SPADEGenerator(2, 1, label_nc=model_opt.get('label_nc', 2)) 
     netG = diffusion.GaussianDiffusion(
         model_diffusion, model_gen, 
         image_size=model_opt['diffusion']['image_size'],
@@ -113,9 +113,12 @@ def define_G(opt):
     return netG
 
 def define_D(opt):
-    from .discriminators import NLayerDiscriminator
+    from .discriminators import NLayerDiscriminator, MultiscaleDiscriminator
     model_opt = opt['model']
-    net = NLayerDiscriminator(model_opt['unet']['out_channel'])
+    if opt.get('train', {}).get('multiscale_d'):
+        net = MultiscaleDiscriminator(model_opt['unet']['out_channel'])
+    else:
+        net = NLayerDiscriminator(model_opt['unet']['out_channel'])
 
     if opt['phase'] == 'train':
         init_weights(net, init_type='normal')

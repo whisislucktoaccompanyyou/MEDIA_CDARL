@@ -257,9 +257,11 @@ class GaussianDiffusion(nn.Module):
         B_noisy = self.q_sample(x_start=a_start, t=t_b, noise=noise)
         B_latent = self.denoise_fn(B_noisy, t_b)
 
-        fractal_index = torch.clamp_min(x_in['F'][:, 0], 0).type(torch.long)
-        fractal = torch.eye(2, device=fractal_index.device)[:, fractal_index].transpose(0, 1)
-        synt_A = self.segment_fn(torch.cat([B_noisy, B_latent], dim=1), fractal.to(device))
+        condition = x_in.get('C')
+        if condition is None:
+            fractal_index = torch.clamp_min(x_in['F'][:, 0], 0).type(torch.long)
+            condition = torch.eye(2, device=fractal_index.device)[:, fractal_index].transpose(0, 1)
+        synt_A = self.segment_fn(torch.cat([B_noisy, B_latent], dim=1), condition.to(device))
 
         #### Cycle path ####
         f_noisy = self.q_sample(x_start=synt_A, t=t_a, noise=noise)
