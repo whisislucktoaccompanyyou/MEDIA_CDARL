@@ -8,7 +8,8 @@ import numpy as np
 import torch
 
 from data.geometry import batch_geometry
-from data.refinement_data import read_gray, reference_transform, target_transform, sha256
+from data.refinement_data import (read_gray, reference_transform, target_transform,
+                                  sha256, model_state_sha256)
 
 
 def save_gray(path, image):
@@ -29,12 +30,14 @@ def validate_refinement(net, cases, output_dir, timesteps, seed=2026, steps=None
     # No overwrite of any prior result, including another checkpoint's outputs.
     output.mkdir(parents=True, exist_ok=False)
     rng = CDARL.capture_training_rng()
-    training = net.training
-    baseline_training = baseline_net.training if baseline_net is not None else None
+    modes = [(module, module.training) for module in net.modules()]
+    baseline_modes = [(module, module.training) for module in baseline_net.modules()] if baseline_net is not None else []
     device = next(net.parameters()).device
     generator = torch.Generator(device=device).manual_seed(seed)
     size = net.image_size
     rows = []
+    metadata = dict(metadata or {})
+    metadata['model_state_sha256'] = model_state_sha256(net)
     net.eval()
     if baseline_net is not None:
         baseline_net.eval()
@@ -78,9 +81,32 @@ def validate_refinement(net, cases, output_dir, timesteps, seed=2026, steps=None
                     if device.type == 'cuda':
                         torch.cuda.synchronize(device)
                     elapsed = time.perf_counter() - start
+                    # Prefer a genuinely different input from the manifest. A flip is
+                    # only a labeled fallback when no alternative image/mask exists.
+                    alternate_mask = case.get('alternate_mask') or next(
+                        (other['mask'] for other in cases if other['mask'] != case['mask']), None)
+                    mask_change = dict(kind='horizontal_flip')
                     changed_target = torch.flip(target, [3])
+                    if alternate_mask:
+                        raw_alternate_mask = read_gray(alternate_mask)
+                        alternate, alternate_meta = target_transform(raw_alternate_mask, size)
+                        alternate_scale = 1 if raw_alternate_mask.max() <= 1 else 255
+                        alternate = alternate.astype(np.float32) / alternate_scale >= threshold
+                        if case.get('training_fov', False):
+                            alternate &= reference > 10
+                        changed_target = torch.from_numpy(alternate.astype(np.float32)*2-1)[None, None].to(device)
+                        mask_change = dict(kind='another_target', path=str(Path(alternate_mask).resolve()),
+                                           sha256=sha256(alternate_mask), transform=alternate_meta)
                     changed = net.synthesize(image, changed_target, timestep, noise=noise, refine_steps=steps)['final']
+                    alternate_reference = case.get('alternate_reference') or next(
+                        (other['reference'] for other in cases if other['reference'] != case['reference']), None)
+                    reference_change = dict(kind='vertical_flip')
                     changed_reference = torch.flip(image, [2])
+                    if alternate_reference:
+                        alternate, alternate_meta = reference_transform(read_gray(alternate_reference), size)
+                        changed_reference = torch.from_numpy(alternate.astype(np.float32)/127.5-1)[None, None].to(device)
+                        reference_change = dict(kind='another_reference', path=str(Path(alternate_reference).resolve()),
+                                                sha256=sha256(alternate_reference), transform=alternate_meta)
                     reference_changed = net.synthesize(changed_reference, target, timestep, noise=noise,
                                                        geometry=geometry, refine_steps=steps)['final']
                     zero = torch.zeros(1, device=device, dtype=torch.long)
@@ -92,7 +118,9 @@ def validate_refinement(net, cases, output_dir, timesteps, seed=2026, steps=None
                     for k, img in enumerate(images):
                         save_gray(destination / (prefix+'I%d.png' % k), img)
                     save_gray(destination / (prefix+'condition_changed.png'), image_u8(changed))
+                    save_gray(destination / (prefix+'condition_changed_target.png'), image_u8(changed_target))
                     save_gray(destination / (prefix+'reference_changed.png'), image_u8(reference_changed))
+                    save_gray(destination / (prefix+'reference_changed_input.png'), image_u8(changed_reference))
                     save_gray(destination / (prefix+'cycle.png'), image_u8(prediction))
                     save_gray(destination / (prefix+'steps.png'), np.concatenate(images, axis=1))
                     mid, radius = size//2, size//6
@@ -114,13 +142,15 @@ def validate_refinement(net, cases, output_dir, timesteps, seed=2026, steps=None
                         elapsed_seconds=elapsed, peak_cuda_bytes=torch.cuda.max_memory_allocated(device) if device.type == 'cuda' else None,
                         internal_cycle_dice=dice, condition_change_mae=float((changed-result['final']).abs().mean()),
                         reference_change_mae=float((reference_changed-result['final']).abs().mean()), baseline=baseline))
+                    rows[-1].update(condition_change=mask_change, reference_change=reference_change)
     finally:
-        net.train(training)
-        if baseline_net is not None:
-            baseline_net.train(baseline_training)
+        # Warmup intentionally mixes train(R) and eval(original G/C). Restore each
+        # module's mode; calling root.train(True) would unfreeze spectral updates.
+        for module, training in modes + baseline_modes:
+            module.training = training
         CDARL.restore_training_rng(rng)
     report = dict(note='Raw grayscale outputs. Cycle Dice is internal consistency, not independent accuracy. '
                        'No histogram matching or low-frequency replacement postprocessing.',
-                  metadata=metadata or {}, cases=rows)
+                  metadata=metadata, cases=rows)
     (output / 'report.json').write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
     return report

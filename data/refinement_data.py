@@ -19,6 +19,17 @@ def sha256(path):
     return digest.hexdigest()
 
 
+def model_state_sha256(net):
+    """Fingerprint current tensors even when step 1 has no checkpoint file yet."""
+    digest = hashlib.sha256()
+    for name, value in sorted(net.state_dict().items()):
+        value = value.detach().cpu().contiguous()
+        digest.update(name.encode('utf-8'))
+        digest.update(str((value.dtype, tuple(value.shape))).encode('ascii'))
+        digest.update(value.numpy().tobytes())
+    return digest.hexdigest()
+
+
 def read_gray(path):
     # imdecode supports non-ASCII Windows paths, unlike some cv2.imread builds.
     image = cv2.imdecode(np.fromfile(path, dtype=np.uint8), cv2.IMREAD_GRAYSCALE)

@@ -51,6 +51,7 @@ def run(opt):
     resume_position = getattr(diffusion, 'epoch_position', 0)
     checkpoint_rng = diffusion.capture_training_rng()
     log_path = root / 'refinement_metrics.jsonl'
+    transform_path = root / 'training_transforms.jsonl'
     safe_to_save = True
     try:
         while step < limit and epoch <= int(opt['train']['n_epoch']):
@@ -79,6 +80,15 @@ def run(opt):
                 step += 1
                 position += 1
                 diffusion.epoch_position = position
+                # Persist the actual sampled fractal, FOV processing and augmentation.
+                # Computing a matrix in the Dataset alone does not make the run auditable.
+                transforms = [dict(step=step, epoch=epoch, epoch_position=position,
+                                   reference_path=reference, mask_path=mask, **json.loads(transform))
+                              for reference, mask, transform in
+                              zip(sample['P'], sample['mask_path'], sample['transform'])]
+                with transform_path.open('a', encoding='utf-8') as handle:
+                    for transform in transforms:
+                        handle.write(json.dumps(transform, ensure_ascii=False) + '\n')
                 if diffusion.device.type == 'cuda':
                     torch.cuda.synchronize(diffusion.device)
                 logs = dict(diffusion.get_current_log())

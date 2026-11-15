@@ -30,8 +30,9 @@ def collect_cases(args):
         value = json.loads(path.read_text(encoding='utf-8'))
         cases = value['cases'] if isinstance(value, dict) else value
         for case in cases:
-            for key in ('reference', 'mask'):
-                case[key] = str((path.parent / case[key]).resolve())
+            for key in ('reference', 'mask', 'alternate_reference', 'alternate_mask'):
+                if key in case:
+                    case[key] = str((path.parent / case[key]).resolve())
         return cases
     if not args.reference_dir or not args.mask_dir:
         raise ValueError('provide --manifest or both --reference_dir and --mask_dir')

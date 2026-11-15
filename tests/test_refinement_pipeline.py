@@ -11,7 +11,7 @@ from torch import nn
 from core.logger import dict_to_nonedict
 from data.geometry import geometry_from_mask, batch_geometry
 from data.refinement_data import (holdout_indices, reference_transform,
-                                  target_transform, training_sample)
+                                  target_transform, training_sample, read_gray)
 from model.ddpm_modules.diffusion_seg import GaussianDiffusion
 from model.ddpm_modules.loss import geometry_losses
 from model.discriminators import sample_valid_patches
@@ -214,6 +214,7 @@ def test_monitor_reproducibility_rng_and_no_overwrite(tmp_path):
     write_image(mp, mask)
     cases = [dict(id='example', reference=str(ip), mask=str(mp), mode='independent')]
     net = toy()
+    net.denoise_fn.eval()
     state = CDARL.capture_training_rng()
     first = validate_refinement(net, cases, str(tmp_path/'one'), [3], seed=42)
     draws = (random.random(), np.random.random(), torch.rand(()).item())
@@ -221,10 +222,35 @@ def test_monitor_reproducibility_rng_and_no_overwrite(tmp_path):
     assert draws == (random.random(), np.random.random(), torch.rand(()).item())
     second = validate_refinement(net, cases, str(tmp_path/'two'), [3], seed=42)
     assert first['cases'][0]['internal_cycle_dice'] == second['cases'][0]['internal_cycle_dice']
+    assert first['metadata']['model_state_sha256'] == second['metadata']['model_state_sha256']
+    assert len(first['metadata']['model_state_sha256']) == 64
     assert (tmp_path/'one/example/t3_I3.png').read_bytes() == (tmp_path/'two/example/t3_I3.png').read_bytes()
     assert net.training
+    assert not net.denoise_fn.training
     with pytest.raises(FileExistsError):
         validate_refinement(net, cases, str(tmp_path/'one'), [3])
+
+
+def test_sensitivity_uses_another_reference_and_target(tmp_path):
+    from refinement_validation import validate_refinement
+    first, second = tmp_path/'first.png', tmp_path/'second.png'
+    mask_a, mask_b = tmp_path/'mask_a.png', tmp_path/'mask_b.png'
+    write_image(first, np.full((64, 64), 120, np.uint8))
+    write_image(second, np.full((64, 64), 190, np.uint8))
+    mask = np.zeros((64, 64), np.uint8)
+    mask[12:45, 19:21] = 255
+    write_image(mask_a, mask)
+    write_image(mask_b, mask.T)
+    cases = [dict(id='a', reference=str(first), mask=str(mask_a)),
+             dict(id='b', reference=str(second), mask=str(mask_b))]
+    report = validate_refinement(toy(), cases, str(tmp_path/'results'), [3])
+    row = report['cases'][0]
+    assert row['reference_change']['kind'] == 'another_reference'
+    assert row['condition_change']['kind'] == 'another_target'
+    assert row['reference_change']['path'] == str(second.resolve())
+    np.testing.assert_array_equal(
+        read_gray(tmp_path/'results/a/t3_reference_changed_input.png'),
+        np.full((64, 64), 190, np.uint8))
 
 
 def test_real_spade_and_unet_use_shared_synthesis(tmp_path):
@@ -335,3 +361,8 @@ def test_training_runner_mid_epoch_resume(tmp_path, monkeypatch):
     for module in ('G', 'H', 'D', 'DL'):
         for key in complete[module]:
             torch.testing.assert_close(resumed[module][key], complete[module][key], atol=0, rtol=0)
+    full_transforms = [json.loads(line) for line in (tmp_path/'full/training_transforms.jsonl').read_text(encoding='utf-8').splitlines()]
+    resumed_transforms = [json.loads(line) for line in (tmp_path/'resumed/training_transforms.jsonl').read_text(encoding='utf-8').splitlines()]
+    assert len(full_transforms) == 3 and resumed_transforms == full_transforms[1:]
+    assert 'matrix' in full_transforms[0]['reference']
+    assert 'augmentation' in full_transforms[0]
