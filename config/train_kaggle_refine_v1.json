@@ -1,0 +1,128 @@
+{
+  "name": "CDARL_kaggle_refine_v1",
+  "phase": "train",
+  "gpu_ids": [
+    0
+  ],
+  "display_port": 8099,
+  "path": {
+    "log": "logs",
+    "tb_logger": "tb_logger",
+    "results": "results",
+    "checkpoint": "checkpoint",
+    "resume_state": null,
+    "pretrained": null
+  },
+  "datasets": {
+    "train": {
+      "name": "KaggleQualityWeighted",
+      "dataroot": "./data/Dataset_Kaggle/",
+      "batch_size": 1,
+      "centered": true,
+      "num_workers": 0,
+      "use_shuffle": true,
+      "source_dir": "../data/kaggle/extracted/train",
+      "quality_csv": "../data/kaggle/Label_EyeQ_train.csv",
+      "quality_weights": {
+        "0": 1.0,
+        "default": 0.3
+      },
+      "refinement": true,
+      "image_size": 384,
+      "monitor_count": 16,
+      "monitor_seed": 2026
+    }
+  },
+  "model": {
+    "finetune_norm": false,
+    "unet": {
+      "in_channel": 1,
+      "out_channel": 1,
+      "inner_channel": 64,
+      "channel_multiplier": [
+        1,
+        1,
+        2,
+        2,
+        4,
+        4
+      ],
+      "attn_res": [
+        24
+      ],
+      "res_blocks": 2,
+      "dropout": 0
+    },
+    "beta_schedule": {
+      "train": {
+        "schedule": "linear",
+        "n_timestep": 2000,
+        "linear_start": 1e-06,
+        "linear_end": 0.01
+      },
+      "val": {
+        "schedule": "linear",
+        "n_timestep": 2000,
+        "linear_start": 1e-06,
+        "linear_end": 0.01
+      }
+    },
+    "diffusion": {
+      "image_size": 384,
+      "channels": 1,
+      "conditional": false
+    },
+    "refinement": {
+      "enabled": true,
+      "channels": 32,
+      "steps": 3,
+      "alpha": 0.1,
+      "warmup_steps": 2000,
+      "path_ramp_steps": 2000,
+      "path_weight": 0.25,
+      "patch_size": 128,
+      "patch_count": 2,
+      "global_gan": 0.2,
+      "local_gan": 0.05,
+      "dice_weight": 0.2,
+      "boundary_weight": 0.05,
+      "allow_from_scratch": false
+    }
+  },
+  "train": {
+    "n_epoch": 1000,
+    "val_freq": 1000,
+    "save_checkpoint_epoch": 10000,
+    "print_freq": 100,
+    "lambda_NCE": 0.0004,
+    "appearance": {
+      "vessel": 0,
+      "rim": 0,
+      "tone": 0,
+      "texture": 0
+    },
+    "optimizer": {
+      "type": "adam",
+      "lr": 1e-05
+    },
+    "ema_scheduler": {
+      "step_start_ema": 5000,
+      "update_ema_every": 1,
+      "ema_decay": 0.9999
+    },
+    "save_checkpoint_freq": 1000,
+    "keep_checkpoints": 3,
+    "diagnostic_freq": 1000,
+    "seed": 2026,
+    "max_steps": 20000,
+    "lambda_perc": 0
+  },
+  "synthesis": {
+    "mode": "internal_unlabeled",
+    "timesteps": [
+      800
+    ],
+    "seed": 2026,
+    "frequency": 1000
+  }
+}

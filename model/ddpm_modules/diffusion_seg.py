@@ -81,7 +81,8 @@ class GaussianDiffusion(nn.Module):
         channels=3,
         loss_type='l1',
         conditional=True,
-        schedule_opt=None
+        schedule_opt=None,
+        refinement=None
     ):
         super().__init__()
         self.channels = channels
@@ -90,6 +91,17 @@ class GaussianDiffusion(nn.Module):
         self.segment_fn = segment_fn
         self.conditional = conditional
         self.loss_type = loss_type
+        self.refinement_opt = refinement or {}
+        self.refiner = None
+        if self.refinement_opt.get('enabled'):
+            from model.refinement import StructureRefiner
+            if getattr(segment_fn, 'label_nc', 2) != 2 or channels != 1:
+                raise ValueError('refinement requires grayscale and the original 2-channel Gs')
+            self.refiner = StructureRefiner(
+                channels=self.refinement_opt.get('channels', 32),
+                steps=self.refinement_opt.get('steps', 3),
+                alpha=self.refinement_opt.get('alpha', 0.1))
+        self.path_geometry_weight = 0.0
         if schedule_opt is not None:
             pass
 
@@ -240,36 +252,70 @@ class GaussianDiffusion(nn.Module):
                     t, x_start.shape) * noise
         )
 
+    def synthesize(self, reference, target, timestep, noise=None, geometry=None,
+                   condition=None, refine_steps=None):
+        """Single B entry shared by training, monitoring and inference.
+
+        target: centered single-channel vessel mask; timestep: diffusion t, not R's k.
+        """
+        if self.refiner is not None and condition is not None:
+            raise ValueError('legacy C is forbidden in refinement mode; geometry must derive from F')
+        if isinstance(timestep, int):
+            timestep = torch.full((reference.shape[0],), timestep, device=reference.device, dtype=torch.long)
+        if ((timestep < 0) | (timestep >= self.num_timesteps)).any():
+            raise ValueError('diffusion timestep outside schedule')
+        noisy = self.q_sample(reference, timestep, noise=noise)
+        latent = self.denoise_fn(noisy, timestep)
+        if condition is None:
+            classes = (target[:, 0] > 0).long()
+            condition = torch.nn.functional.one_hot(classes, 2).permute(0, 3, 1, 2).to(reference)
+        initial = self.segment_fn(torch.cat([noisy, latent], 1), condition.to(reference))
+        if self.refiner is not None:
+            if geometry is None:
+                from data.geometry import batch_geometry
+                geometry = batch_geometry(target)
+            images = self.refiner(initial, reference, geometry, steps=refine_steps)
+        else:
+            images = [initial]
+        return {'initial': initial, 'images': images, 'final': images[-1],
+                'noisy': noisy, 'latent': latent, 'geometry': geometry}
+
+    def cycle(self, image, timestep, noise=None):
+        noisy = self.q_sample(image, timestep, noise=noise)
+        return self.segment_fn(torch.cat([noisy, self.denoise_fn(noisy, timestep)], 1))
+
     def p_losses(self, x_in, noise=None):
         a_start = x_in['A']
+        b = a_start.shape[0]
         device = a_start.device
-        [b, c, h, w] = a_start.shape
         noise = default(noise, lambda: torch.randn_like(a_start))
-
-        #### A path ####
-        t_a = torch.randint(0, 200, (b,), device=device).long() #200
-        A_noisy = self.q_sample(x_start=a_start, t=t_a, noise=noise)
+        t_a = torch.randint(0, min(200, self.num_timesteps), (b,), device=device).long()
+        A_noisy = self.q_sample(a_start, t_a, noise=noise)
         A_latent = self.denoise_fn(A_noisy, t_a)
-        mask_V = self.segment_fn(torch.cat([A_noisy, A_latent], dim=1))
-
-        #### B path ####
+        mask_V = self.segment_fn(torch.cat([A_noisy, A_latent], 1))
         t_b = torch.randint(0, self.num_timesteps, (b,), device=device).long()
-        B_noisy = self.q_sample(x_start=a_start, t=t_b, noise=noise)
-        B_latent = self.denoise_fn(B_noisy, t_b)
-
-        fractal_index = torch.clamp_min(x_in['F'][:, 0], 0).type(torch.long)
-        fractal = torch.eye(2, device=fractal_index.device)[:, fractal_index].transpose(0, 1)
-        synt_A = self.segment_fn(torch.cat([B_noisy, B_latent], dim=1), fractal.to(device))
-
-        #### Cycle path ####
-        f_noisy = self.q_sample(x_start=synt_A, t=t_a, noise=noise)
-        f_recon = self.denoise_fn(f_noisy, t_a)
-        mask_F = self.segment_fn(torch.cat([f_noisy, f_recon], dim=1))
-
-        l_dif = self.loss_func(noise, B_latent) 
-        l_dif = l_dif.sum() / int(b * c * h * w)
+        result = self.synthesize(a_start, x_in['F'], t_b, noise=noise,
+                                 geometry=x_in.get('Cf'), condition=x_in.get('C'))
+        synt_A = result['final']
+        mask_F = self.cycle(synt_A, t_a, noise=noise)
+        l_dif = self.loss_func(noise, result['latent']) / noise.numel()
         l_cyc = self.loss_cyc(mask_F, x_in['F'])
-        return [A_noisy, A_latent, B_latent, mask_V, synt_A, mask_F], [l_dif, l_cyc]
+        output = [A_noisy, A_latent, result['latent'], mask_V, synt_A, mask_F]
+        if self.refiner is None:
+            return output, [l_dif, l_cyc]
+        from .loss import geometry_losses
+        final_dice, final_boundary = geometry_losses(mask_F, x_in['F'], x_in.get('V'))
+        path_dice = path_boundary = synt_A.new_zeros(())
+        path_index = 0
+        # Pick one *refined*, non-final step; I0 is retained as a baseline.
+        if self.path_geometry_weight > 0 and len(result['images']) > 2:
+            path_index = int(torch.randint(1, len(result['images']) - 1, ()).item())
+            prediction = self.cycle(result['images'][path_index], t_a, noise=noise)
+            path_dice, path_boundary = geometry_losses(prediction, x_in['F'], x_in.get('V'))
+        extra = {'synthesis': result, 'dice': final_dice, 'boundary': final_boundary,
+                 'path_dice': path_dice, 'path_boundary': path_boundary,
+                 'path_index': path_index}
+        return output, [l_dif, l_cyc], extra
 
     def forward(self, x, *args, **kwargs):
         return self.p_losses(x, *args, **kwargs)

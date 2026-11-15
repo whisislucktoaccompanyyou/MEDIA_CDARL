@@ -88,3 +88,23 @@ class GANLoss(nn.Module):
             else:
                 loss = prediction.mean()
         return loss
+
+def soft_boundary(probability):
+    dilated = F.max_pool2d(probability, 3, stride=1, padding=1)
+    eroded = -F.max_pool2d(-probability, 3, stride=1, padding=1)
+    return dilated - eroded
+
+
+def geometry_losses(prediction, target, valid=None):
+    """Per-sample normalized soft Dice and boundary Dice, no detached predictions."""
+    p = ((prediction + 1) * 0.5).clamp(0, 1)
+    f = (target > 0).to(p)
+    valid = torch.ones_like(f) if valid is None else valid.to(p)
+
+    def dice(a, b):
+        a, b = a * valid, b * valid
+        dims = tuple(range(1, a.ndim))
+        return (1 - (2 * (a * b).sum(dims) + 1e-6) /
+                (a.sum(dims) + b.sum(dims) + 1e-6)).mean()
+
+    return dice(p, f), dice(soft_boundary(p), soft_boundary(f))

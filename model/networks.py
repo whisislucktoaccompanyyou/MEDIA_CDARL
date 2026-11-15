@@ -102,7 +102,8 @@ def define_G(opt):
         channels=model_opt['diffusion']['channels'],
         loss_type='l2',  
         conditional=model_opt['diffusion']['conditional'],
-        schedule_opt=model_opt['beta_schedule']['train']
+        schedule_opt=model_opt['beta_schedule']['train'],
+        refinement=model_opt.get('refinement')
     )
     if opt['phase'] == 'train':
         init_weights(netG.denoise_fn, init_type='orthogonal')
@@ -160,7 +161,7 @@ class PatchSampleF(nn.Module):
         for mlp_id, feat in enumerate(feats):
             input_nc = feat.shape[1]
             mlp = nn.Sequential(*[nn.Linear(input_nc, self.nc), nn.ReLU(), nn.Linear(self.nc, self.nc)])
-            if len(self.gpu_ids) > 0:
+            if self.gpu_ids and torch.cuda.is_available():
                 mlp.cuda()
             setattr(self, 'mlp_%d' % mlp_id, mlp)
         init_weights(self, init_type=self.init_type)

@@ -1,4 +1,5 @@
-data/
+/data/*
+!/data/*.py
 
 # 实验目录（权重、日志）只留在本机，不上传
 experiments/
@@ -25,3 +26,5 @@ logs_launch/
 *.tif
 *.tiff
 *.webp
+
+.pytest_cache/

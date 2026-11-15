@@ -165,6 +165,16 @@ def print_summary(summary):
 
 
 def validate(net, input_dir, output_dir, timesteps, seed=2026, match=False, light=False):
+    if getattr(net, 'refiner', None) is not None:
+        if match or light:
+            raise ValueError('refinement exports raw outputs only')
+        from refinement_validation import validate_refinement
+        pairs, missing = find_pairs(input_dir)
+        if not pairs or missing:
+            raise ValueError('missing explicit image/mask pairs: ' + str(missing))
+        cases = [dict(id=stem, reference=image, mask=mask, mode='corresponding')
+                 for stem, image, mask in pairs]
+        return validate_refinement(net, cases, output_dir, timesteps, seed)
     if os.path.basename(os.path.abspath(output_dir)) in FORBIDDEN_OUTPUTS:
         raise RuntimeError("refusing to write into an existing result folder: " + output_dir)
     os.makedirs(output_dir, exist_ok=True)
@@ -193,12 +203,9 @@ def validate(net, input_dir, output_dir, timesteps, seed=2026, match=False, ligh
                     if not 0 <= t < net.num_timesteps:
                         raise ValueError("Invalid timestep")
                     timestep = torch.full((1,), t, device=device, dtype=torch.long)
-                    noisy = net.q_sample(image, timestep, noise=noise)
-                    latent = net.denoise_fn(noisy, timestep)
-                    features = torch.cat([noisy, latent], 1)
-                    synthetic = net.segment_fn(features, condition)
-                    # Identical reference/noise, changed condition: measures whether mask is used.
-                    changed = net.segment_fn(features, torch.flip(condition, [3]))
+                    target_mask = classes[:, None].float() * 2 - 1
+                    synthetic = net.synthesize(image, target_mask, timestep, noise=noise)['final']
+                    changed = net.synthesize(image, torch.flip(target_mask, [3]), timestep, noise=noise)['final']
                     reconstructed = net.segment_fn(torch.cat([
                         synthetic, net.denoise_fn(synthetic, torch.zeros_like(timestep))
                     ], 1))

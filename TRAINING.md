@@ -1,3 +1,82 @@
+# B 路径结构细化 v1（2026-11-15，代码接入）
+
+本轮实现基于 `master`，没有合并或更新 `main`。方案来源为 `idea/B路径合成改造方案_无标注结构细化_v1.md`。本机只有 PyTorch 2.11.0 CPU，仓库未提供可核实的原模型权重及 Kaggle 训练数据，因此**尚未启动正式预热或 20k 联合训练，也没有生成质量或真实分割提升的实验结论**。下文历史实验记录不代表此次新模型的训练结果。
+
+## 已实现内容
+
+- 保留原 A/C 及 Gε/Gs 共享参数，B 的初始输出 I0 后接同一个 R，默认迭代 3 步。R 为基础通道 32、两次下采样的 U-Net，共 **484,897 个参数**，8 通道输入，多尺度注入目标几何，零初始化输出头，使用 alpha=0.1 的 logit 残差更新。
+- 条件全部来自本批二值分形 F。Gs 仍接收原 2 通道 one-hot；R 接收占据区域、边界、中心线、内正外负的截断距离图。距离半径在 384 分辨率为 16 像素。几何在随机增强后重新计算，空掩膜、全前景、细支有有限输出。
+- C 接收最终细化图。新增最终 soft Dice、软边界 Dice；联合阶段随机抽取一个非最终细化步骤执行同一 C，中间几何系数在 2000 步内从 0 渐增至最终项的 0.25。首版不引入 soft-clDice、教师或真实血管标注。
+- 整体 LSGAN 系数 0.2；局部 PatchGAN 为基础通道 32、2 层，系数 0.05。每张图抽取两个 128×128 块，99% 以上像素位于参考图有效视野，真实与合成使用相同坐标。没有可用块时明确报错，须统一降低 patch_size。
+- 前 2000 次更新仅训练 R 和两个 D，原 Gε/Gs/H 冻结；原模块使用 eval 模式，避免 dropout 和 spectral normalization 的缓冲状态漂移。随后联合训练至 20000 步。梯度始终可以经过 C 回到 R。
+- 原 NCE 的 detach 和 sum 归约保持原样，其直接训练 H，不作为几何监督。H 的输入单独固定为 256，避免 384 分辨率改变原 PatchSampleF 的 MLP 形状。原始/加权损失均记入 `refinement_metrics.jsonl`；NCE_raw 表示应用原 lambda_NCE 后的基线项，其余 raw 项为未加系数的均值损失。
+- 新实验关闭逐位置 VGG 和旧 appearance 项；沿用 quality 配置的采样权重（等级 0 为 1.0，其余默认 0.3）。分形独立随机抽取，不读取旧 conditions。
+
+## 数据与兼容性
+
+新配置为 `config/train_kaggle_refine_v1.json`，默认 384×384、batch=1、单设备。原 256 的 attention 分辨率 16 映射到 384 的 24，保留相同模块层级和参数键。若统一降到 256 做接入实验，需要同时设置 dataset/model 的 image_size=256、attn_res=[16]，不能将分辨率收益计为 R 的收益。
+
+程序读取现有 `split_manifest.json` 的 train 列表，再按受试者分组留出约 16 张内部无标注监测图；识别 `_left/_right/_OS/_OD/_L/_R` 等文件名后缀，同组双眼一并留出。若文件名无法表达真实受试者关系，启动前应核实清单。监测图不参与优化，固定分形来自程序生成的 trainA。清单、输入 SHA256 和训练/监测受试者列表保存在 `monitor_manifest.json`，运行配置保存为 `config_snapshot.json`。
+
+参考图保留完整有效眼底，裁黑边后正方形填充；独立目标掩膜按完整坐标域最近邻缩放，不按血管包围盒放大。训练/内部监测将目标与参考有效视野求交，并记录处理前后像素数；用户测试默认不裁掉目标细支。对应参考模式对掩膜共用原图变换。裁剪、填充、像素中心变换矩阵及训练增强矩阵均记录。
+
+`num_workers=0` 是此首版恢复协议的显式约束：完整保存 epoch 位置、epoch 开始和当前的 Python/NumPy/Torch/CUDA 随机状态，恢复时重建采样顺序，跳过已完成批次后恢复模型随机流。监测使用独立噪声生成器并还原训练随机状态。此约束避免多进程预取状态遗漏；跨设备/不同 CUDA 算子版本仍应重新做复现检查。
+
+## 启动与恢复
+
+先在训练主机安装与 GPU 相符的 PyTorch，再安装新增依赖：
+
+```bash
+python -m pip install -r requirements-refinement.txt
+```
+
+核实配置中的数据和质量 CSV 路径。迁移需要实际存在的、原 2 条件通道同架构的 `<prefix>_G.pth` 与 `<prefix>_H.pth`。程序记录权重 SHA256 及全部缺失/多余/形状不匹配键；只允许新增 refiner 键缺失，其余不兼容立即失败。默认不允许从随机原网络直接开始新模块预热，不填写猜测的历史权重前缀。
+
+```bash
+PRETRAINED=/verified/original/checkpoint/Ixxxxx_Ex GPU=0 bash run_train_refine_v1.sh
+# 等价入口
+python main.py --config config/train_kaggle_refine_v1.json --phase train --gpu_ids 0 \
+  --pretrained /verified/original/checkpoint/Ixxxxx_Ex
+
+# 同架构新实验完整恢复：不再传 pretrained
+RESUME=/new/experiment/checkpoint/I1000_E1 GPU=0 bash run_train_refine_v1.sh
+```
+
+每 1000 步、预热边界及退出时保存 `<prefix>_refine.pth`（G 内含 R、H、整体/局部 D、四个优化器、计数、阶段、采样位置、随机状态、配置签名、迁移报告），另导出 `<prefix>_G.pth` 用于推理。完整状态以临时文件加原子重命名写入；至少保留最近 3 组，另保留预热边界、每 5000 步里程碑和最终上限。旧六文件优化器状态不能用于新实验 resume；原配置继续沿用旧格式。
+
+首次更新及每 1000 步输出内部固定监测结果；不会读取 `test_input`，不会启动论文中的外部教师。每步记录时间、原始/加权损失、R 梯度范数、阶段和 CUDA 峰值显存。正式训练前须在目标 GPU 实测 384 的显存和吞吐；本机 CPU 接入耗时不能作为 GPU 训练预算。
+
+## 训练后测试
+
+```bash
+python test_refinement.py --config config/train_kaggle_refine_v1.json \
+  --weight /new/checkpoint/I20000_Ex --manifest /inputs/cases.json \
+  --baseline_weight /verified/original/checkpoint/Ixxxxx_Ex \
+  --output_dir /new/results/refinement_comparison --seed 2026 \
+  --timesteps 200 800 1600 --refine_steps 3
+```
+
+manifest 支持以下形式，路径相对清单文件解析：
+
+```json
+{"cases": [
+  {"id": "independent_01", "reference": "reference_a.png", "mask": "target_b.png", "mode": "independent"},
+  {"id": "corresponding_01", "reference": "reference_b.png", "mask": "target_b.png", "mode": "corresponding"}
+]}
+```
+
+也支持 `--reference_dir ... --mask_dir ... --mode independent`，按明确相同文件 stem 配对；任意独立组合使用 manifest。掩膜支持单通道 0/1 或 0/255，正值为血管，`--threshold` 默认 0.5，不自动猜极性。输出目录必须不存在。
+
+输出原始参考/目标、坐标变换后的有效掩膜、四通道几何、I0…I3、中心放大对照、C 预测、固定噪声换掩膜及换参考图的诊断图，以及含输入/权重哈希、配置、时间、显存、设备、阈值的 JSON。没有直方图匹配或低频替换后处理。`--baseline_weight` 可选但建议提供：联合训练后的 I0 已被更新，不能独自充当原模型消融基线。循环 Dice 仅表示训练中 C 的内部一致性，不是独立分割准确率。
+
+## 本次实际验证
+
+运行 `python -m pytest tests/test_refinement_pipeline.py -q`，覆盖几何边界条件、旧 B 一致性、零初始化、各步骤几何梯度、局部块对称采样、坐标/增强/受试者划分、预热与联合更新、严格迁移、完整保存恢复、监测随机流、真实 U-Net/SPADE 前向及反向传播。训练入口另以小网络和临时无标注数据执行中途打断/恢复，比较连续运行的 G/H/整体 D/局部 D 全部参数。
+
+这些是接入正确性检查；真实 384 长训、目标 GPU 显存、旧权重实物迁移以及独立真实标注评估尚待训练环境具备后执行。本轮不据此声称图像更真实或真实分割指标更高。
+
+---
+
 # 眼底数据训练记录
 
 这份说明只记录我们在官方 C-DARL 上做的眼底实验：用了哪些数据、用哪份配置启动、权重存在哪里、怎么看进度。官方论文和原始 XCAD 训练见 [README.md](README.md)。

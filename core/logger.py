@@ -25,7 +25,7 @@ def parse(args):
     # remove comments starting with '//'
     json_str = ''
 
-    with open(opt_path, 'r') as f:
+    with open(opt_path, 'r', encoding='utf-8') as f:
         for line in f:
             line = line.split('//')[0]+ '\n' #
             json_str += line
@@ -38,7 +38,7 @@ def parse(args):
         'experiments', '{}_{}'.format(opt['name'], get_timestamp()))
     opt['path']['experiments_root'] = experiments_root
     for key, path in opt['path'].items():
-        if 'resume' not in key and 'experiments' not in key:
+        if key in ('log', 'tb_logger', 'results', 'checkpoint'):
             opt['path'][key] = os.path.join(experiments_root, path)
             mkdirs(opt['path'][key])
 
@@ -53,7 +53,7 @@ def parse(args):
         gpu_list = ','.join(str(x) for x in opt['gpu_ids'])
     os.environ['CUDA_VISIBLE_DEVICES'] = gpu_list
     print('export CUDA_VISIBLE_DEVICES=' + gpu_list)
-    if len(gpu_list) > 1:
+    if len(opt['gpu_ids']) > 1:
         opt['distributed'] = True
     else:
         opt['distributed'] = False

@@ -1,5 +1,27 @@
 import torch.nn as nn
 import functools
+import torch
+import torch.nn.functional as F
+
+
+def sample_valid_patches(real, fake, valid, size=128, count=2):
+    """Identical uniform FOV sampling for real/fake; never conditioned on vessels."""
+    if size > min(real.shape[-2:]) or size < 32 or count < 1:
+        raise ValueError('local patches require 32 <= size <= image size and count >= 1')
+    real_patches, fake_patches = [], []
+    for i in range(real.shape[0]):
+        # Integral images avoid an expensive dense size*size convolution.
+        integral = F.pad(valid[i, 0].float(), (1, 0, 1, 0)).cumsum(0).cumsum(1)
+        coverage = (integral[size:, size:] - integral[:-size, size:] -
+                    integral[size:, :-size] + integral[:-size, :-size]) / (size * size)
+        positions = (coverage >= 0.99).nonzero()
+        if len(positions) == 0:
+            raise ValueError('no local patch lies within the reference FOV; reduce patch_size')
+        indices = torch.randint(len(positions), (count,), device=positions.device)
+        for y, x in positions[indices].tolist():
+            real_patches.append(real[i:i+1, :, y:y+size, x:x+size])
+            fake_patches.append(fake[i:i+1, :, y:y+size, x:x+size])
+    return torch.cat(real_patches), torch.cat(fake_patches)
 
 class NLayerDiscriminator(nn.Module):
     """Defines a PatchGAN discriminator"""

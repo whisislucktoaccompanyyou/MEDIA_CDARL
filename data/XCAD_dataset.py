@@ -8,7 +8,9 @@ import data.util as Util
 from PIL import Image
 
 class XCADDataset(Dataset):
-    def __init__(self, dataroot, split='train', source_dir=None, quality_csv=None, quality_weights=None):
+    def __init__(self, dataroot, split='train', source_dir=None, quality_csv=None, quality_weights=None, image_size=256, refinement=False, monitor_count=16, monitor_seed=2026):
+        self.refinement = refinement
+        self.monitor_seed = monitor_seed
         self.source_dir = source_dir
         self.split = split
         self.sample_weights = None
@@ -26,6 +28,15 @@ class XCADDataset(Dataset):
                     manifest = json.load(f)
                 self.A_paths = [os.path.join(source_dir, name) for name in manifest['train']]
                 self.sample_weights = self._quality_weights(manifest['train'], quality_csv, quality_weights)
+            if refinement:
+                from data.refinement_data import holdout_indices
+                held = set(holdout_indices(self.A_paths, monitor_count, monitor_seed))
+                self.monitor_paths = [p for i, p in enumerate(self.A_paths) if i in held]
+                self.A_paths = [p for i, p in enumerate(self.A_paths) if i not in held]
+                if self.sample_weights is not None:
+                    self.sample_weights = [w for i, w in enumerate(self.sample_weights) if i not in held]
+                if not self.F_paths:
+                    raise ValueError('refinement requires program-generated train/trainA masks')
             self.data_len = len(self.A_paths)
             self.data_lenF = len(self.F_paths)
 
@@ -56,7 +67,7 @@ class XCADDataset(Dataset):
                 self.imageNum.append(FileName)
             self.data_len = len(self.imageNum)
 
-        self.inputSize = 256
+        self.inputSize = int(image_size)
 
     def _quality_weights(self, names, quality_csv, quality_weights):
         if not quality_csv or not quality_weights:
@@ -101,6 +112,9 @@ class XCADDataset(Dataset):
 
     def __getitem__(self, index):
 
+        if self.split == 'train' and self.refinement:
+            from data.refinement_data import training_sample
+            return training_sample(self.A_paths[index], self.F_paths[np.random.randint(self.data_lenF)], self.inputSize)
         if self.split == 'train':
             if not self.source_dir:
                 self._shuffle_data_index()

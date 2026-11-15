@@ -33,6 +33,10 @@ def create_dataset_xcad(dataset_opt, phase):
         source_dir=dataset_opt.get('source_dir'),
         quality_csv=dataset_opt.get('quality_csv'),
         quality_weights=dataset_opt.get('quality_weights'),
+        image_size=dataset_opt.get('image_size', 256),
+        refinement=dataset_opt.get('refinement', False),
+        monitor_count=dataset_opt.get('monitor_count', 16),
+        monitor_seed=dataset_opt.get('monitor_seed', 2026),
     )
     logger = logging.getLogger('base')
     logger.info('Dataset [{:s} - {:s}] is created.'.format(dataset.__class__.__name__, dataset_opt['name']))

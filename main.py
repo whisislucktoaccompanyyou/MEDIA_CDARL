@@ -23,10 +23,17 @@ if __name__ == "__main__":
     parser.add_argument('-gpu', '--gpu_ids', type=str, default=None)
     parser.add_argument('-debug', '-d', action='store_true')
 
+    parser.add_argument('--pretrained', help='verified original G/H checkpoint prefix for refinement migration')
+    parser.add_argument('--resume', help='complete new refinement checkpoint prefix')
+
     # parse configs
     args = parser.parse_args()
     opt = Logger.parse(args)
     # Convert to NoneDict, which return None for missing key.
+    if args.pretrained:
+        opt['path']['pretrained'] = args.pretrained
+    if args.resume:
+        opt['path']['resume_state'] = args.resume
     opt = Logger.dict_to_nonedict(opt)
     visualizer = Visualizer(opt)
 
@@ -37,6 +44,11 @@ if __name__ == "__main__":
     Logger.setup_logger(None, opt['path']['log'], 'train', level=logging.INFO, screen=True)
     logger = logging.getLogger('base')
     logger.info(Logger.dict2str(opt))
+
+    if opt['phase'] == 'train' and (opt['model'].get('refinement') or {}).get('enabled'):
+        from refinement_training import run
+        run(opt)
+        raise SystemExit(0)
 
     batchSize = opt['datasets']['train']['batch_size']
     # dataset

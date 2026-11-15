@@ -1,7 +1,6 @@
 import math
 import numpy as np
 import cv2
-from torchvision.utils import make_grid
 
 def tensor2im(image_tensor, imtype=np.float32, min_max=(-1, 1)):
     image_numpy = image_tensor.squeeze().cpu().float().numpy()
@@ -38,6 +37,7 @@ def tensor2img(tensor, out_type=np.uint8, min_max=(-1, 1)):
         (min_max[1] - min_max[0])  # to range [0,1]
     n_dim = tensor.dim()
     if n_dim == 4:
+        from torchvision.utils import make_grid
         n_img = len(tensor)
         img_np = make_grid(tensor, nrow=int(
             math.sqrt(n_img)), normalize=False).numpy()
